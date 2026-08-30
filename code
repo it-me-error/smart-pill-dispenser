@@ -1,0 +1,431 @@
+#include <Wire.h>
+#include <RTClib.h>
+#include <LiquidCrystal.h>
+#include <Servo.h>
+#include <SoftwareSerial.h>
+
+// ---------------- COMPONENTS ----------------
+RTC_DS3231 rtc;
+LiquidCrystal lcd(13, 12, 11, 10, 9, 8);
+Servo myServo;
+SoftwareSerial BT(2, 3);   // RX, TX
+
+// ---------------- PIN SETTINGS ----------------
+int servoPin = 7;
+int irPin = 6;
+int buzzerPin = 5;
+int ledPin = 4;
+
+// ---------------- SERVO SLOTS ----------------
+int slotAngles[4] = {0, 45, 90, 135};
+int currentSlot = -1;
+
+// ---------------- ALARM SETTINGS ----------------
+int alarmH[5];
+int alarmM[5];
+int alarmCount = 0;
+bool alarmDone[5];
+
+// ---------------- SMS NUMBER ----------------
+const char phoneNumber[] = "+919840166131";
+
+// =================================================
+// SEND SMS
+// =================================================
+void sendSMS(const char *msg) {
+
+  Serial.println("AT");
+  delay(800);
+
+  Serial.println("AT+CMGF=1");
+  delay(800);
+
+  Serial.print("AT+CMGS=\"");
+  Serial.print(phoneNumber);
+  Serial.println("\"");
+  delay(800);
+
+  Serial.println(msg);
+  delay(800);
+
+  Serial.write(26);   // CTRL+Z
+  delay(3000);
+}
+
+// =================================================
+// BUZZER + LED FOR 20 SECONDS
+// =================================================
+void alert20Sec() {
+
+  digitalWrite(buzzerPin, HIGH);
+  digitalWrite(ledPin, HIGH);
+
+  delay(20000);
+
+  digitalWrite(buzzerPin, LOW);
+  digitalWrite(ledPin, LOW);
+}
+
+// =================================================
+// ROTATE TO NEXT PILL SLOT
+// =================================================
+void rotateToNextSlot() {
+
+  currentSlot++;
+
+  // If all 4 slots are completed
+  if (currentSlot >= 4) {
+
+    // Return servo to home position
+    myServo.write(0);
+    delay(2000);
+
+    // Start again from slot 1
+    currentSlot = 0;
+
+    // Send refill message
+    sendSMS("Refill the Dispenser");
+  }
+
+  // Move servo to selected slot
+  int angle = slotAngles[currentSlot];
+
+  myServo.write(angle);
+
+  // Display dispensing information
+  lcd.clear();
+
+  lcd.setCursor(0, 0);
+  lcd.print("Dispensed Slot");
+
+  lcd.setCursor(0, 1);
+  lcd.print("Slot ");
+  lcd.print(currentSlot + 1);
+
+  delay(2000);
+}
+
+// =================================================
+// DISPLAY CURRENT TIME
+// =================================================
+void displayTime(DateTime now) {
+
+  lcd.setCursor(0, 0);
+
+  lcd.print("Time ");
+
+  if (now.hour() < 10) {
+    lcd.print("0");
+  }
+
+  lcd.print(now.hour());
+  lcd.print(":");
+
+  if (now.minute() < 10) {
+    lcd.print("0");
+  }
+
+  lcd.print(now.minute());
+
+  lcd.print("    ");
+
+  // Second line
+  lcd.setCursor(0, 1);
+  lcd.print("                ");
+}
+
+// =================================================
+// READ BLUETOOTH ALARMS
+// Format:
+// 12:20,13:30,20:30,21:30
+// =================================================
+void readBluetooth() {
+
+  if (BT.available()) {
+
+    String input = BT.readStringUntil('\n');
+
+    // Remove spaces, \r and \n
+    input.trim();
+
+    if (input.length() == 0) {
+      return;
+    }
+
+    // Reset alarm count
+    alarmCount = 0;
+
+    int start = 0;
+
+    while (start < input.length() && alarmCount < 5) {
+
+      // Find :
+      int colon = input.indexOf(':', start);
+
+      if (colon == -1) {
+        break;
+      }
+
+      // Find ,
+      int comma = input.indexOf(',', colon);
+
+      if (comma == -1) {
+        comma = input.length();
+      }
+
+      // Extract hour
+      String hourString =
+        input.substring(start, colon);
+
+      // Extract minute
+      String minuteString =
+        input.substring(colon + 1, comma);
+
+      alarmH[alarmCount] =
+        hourString.toInt();
+
+      alarmM[alarmCount] =
+        minuteString.toInt();
+
+      // Validate time
+      if (alarmH[alarmCount] >= 0 &&
+          alarmH[alarmCount] <= 23 &&
+          alarmM[alarmCount] >= 0 &&
+          alarmM[alarmCount] <= 59) {
+
+        alarmDone[alarmCount] = false;
+
+        // Display saved alarm
+        lcd.clear();
+
+        lcd.setCursor(0, 0);
+        lcd.print("Alarm ");
+        lcd.print(alarmCount + 1);
+
+        lcd.setCursor(0, 1);
+
+        if (alarmH[alarmCount] < 10) {
+          lcd.print("0");
+        }
+
+        lcd.print(alarmH[alarmCount]);
+        lcd.print(":");
+
+        if (alarmM[alarmCount] < 10) {
+          lcd.print("0");
+        }
+
+        lcd.print(alarmM[alarmCount]);
+
+        delay(1000);
+
+        alarmCount++;
+      }
+
+      // Move to next alarm
+      start = comma + 1;
+    }
+
+    // Show number of alarms
+    lcd.clear();
+
+    lcd.setCursor(0, 0);
+    lcd.print("Alarms Saved:");
+
+    lcd.setCursor(0, 1);
+    lcd.print(alarmCount);
+
+    delay(1500);
+  }
+}
+
+// =================================================
+// CHECK WHETHER PILL WAS TAKEN
+// =================================================
+bool checkTabletTaken() {
+
+  unsigned long startT = millis();
+
+  // Wait for maximum 60 seconds
+  while (millis() - startT < 60000UL) {
+
+    // IR sensor LOW = object detected
+    if (digitalRead(irPin) == LOW) {
+
+      return true;
+    }
+
+    delay(50);
+  }
+
+  return false;
+}
+
+// =================================================
+// SETUP
+// =================================================
+void setup() {
+
+  // LCD
+  lcd.begin(16, 2);
+
+  // I2C
+  Wire.begin();
+
+  // RTC
+  rtc.begin();
+
+  // Serial
+  Serial.begin(9600);
+
+  // Bluetooth
+  BT.begin(9600);
+
+  // Servo
+  myServo.attach(servoPin);
+
+  // Pins
+  pinMode(irPin, INPUT);
+  pinMode(buzzerPin, OUTPUT);
+  pinMode(ledPin, OUTPUT);
+
+  // Turn OFF outputs
+  digitalWrite(buzzerPin, LOW);
+  digitalWrite(ledPin, LOW);
+
+  // Servo home position
+  myServo.write(0);
+
+  // Initialize alarms
+  for (int i = 0; i < 5; i++) {
+    alarmDone[i] = false;
+    alarmH[i] = 0;
+    alarmM[i] = 0;
+  }
+
+  // -------------------------------------------------
+  // RTC SET TIME
+  // -------------------------------------------------
+  // Uncomment this line ONLY when setting RTC
+  // for the first time.
+  //
+  // rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  //
+  // After uploading once, comment it again.
+  // -------------------------------------------------
+
+  lcd.clear();
+
+  lcd.setCursor(0, 0);
+  lcd.print("Pill Dispenser");
+
+  lcd.setCursor(0, 1);
+  lcd.print("System Ready");
+
+  delay(2000);
+
+  lcd.clear();
+}
+
+// =================================================
+// LOOP
+// =================================================
+void loop() {
+
+  // -----------------------------------------------
+  // READ BLUETOOTH
+  // -----------------------------------------------
+  readBluetooth();
+
+  // -----------------------------------------------
+  // GET CURRENT RTC TIME
+  // -----------------------------------------------
+  DateTime now = rtc.now();
+
+  // -----------------------------------------------
+  // DISPLAY CURRENT TIME
+  // -----------------------------------------------
+  displayTime(now);
+
+  // -----------------------------------------------
+  // CHECK ALL ALARMS
+  // -----------------------------------------------
+  for (int i = 0; i < alarmCount; i++) {
+
+    // Check alarm time
+    if (!alarmDone[i] &&
+        now.hour() == alarmH[i] &&
+        now.minute() == alarmM[i]) {
+
+      // -------------------------------------------
+      // DISPENSE TABLET
+      // -------------------------------------------
+      rotateToNextSlot();
+
+      // -------------------------------------------
+      // BUZZER + LED
+      // -------------------------------------------
+      alert20Sec();
+
+      // -------------------------------------------
+      // SMS: TABLET DISPENSED
+      // -------------------------------------------
+      sendSMS("Tablet Dispatched");
+
+      // -------------------------------------------
+      // CHECK IR SENSOR
+      // -------------------------------------------
+      bool taken = checkTabletTaken();
+
+      // -------------------------------------------
+      // TABLET TAKEN
+      // -------------------------------------------
+      if (taken) {
+
+        sendSMS("Tablet Taken");
+
+        lcd.clear();
+
+        lcd.setCursor(0, 0);
+        lcd.print("Tablet Taken");
+
+        lcd.setCursor(0, 1);
+        lcd.print("Thank You");
+
+        delay(2000);
+      }
+
+      // -------------------------------------------
+      // TABLET NOT TAKEN
+      // -------------------------------------------
+      else {
+
+        // Alert again for 20 seconds
+        alert20Sec();
+
+        sendSMS("Tablet Not Taken");
+
+        lcd.clear();
+
+        lcd.setCursor(0, 0);
+        lcd.print("Tablet Not Taken");
+
+        lcd.setCursor(0, 1);
+        lcd.print("Check Required");
+
+        delay(2000);
+      }
+
+      // -------------------------------------------
+      // MARK ALARM AS COMPLETED
+      // -------------------------------------------
+      alarmDone[i] = true;
+
+      // Prevent immediate repeated trigger
+      delay(60000);
+    }
+  }
+
+  // Small delay
+  delay(200);
+}
